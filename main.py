@@ -452,20 +452,24 @@ async def wait_for_response(
         timeout = min(max(timeout, 1), 120)
         entity = await client.get_entity(chat_id)
 
-        # Get current last message as baseline
-        kwargs = {"limit": 1}
+        # Get baseline: find last outgoing message to avoid race condition
+        # where bot responds before wait_for_response is called
+        kwargs = {"limit": 10, "from_user": "me"}
         if topic_id is not None:
             kwargs["reply_to"] = topic_id
-        baseline_messages = await client.get_messages(entity, **kwargs)
-        baseline_id = baseline_messages[0].id if baseline_messages else 0
+        my_messages = await client.get_messages(entity, **kwargs)
+        baseline_id = my_messages[0].id if my_messages else 0
 
         # Poll for new messages
         poll_interval = 1.0
         deadline = time.monotonic() + timeout
         new_messages = []
+        first_check = True
 
         while time.monotonic() < deadline:
-            await asyncio.sleep(poll_interval)
+            if not first_check:
+                await asyncio.sleep(poll_interval)
+            first_check = False
 
             fetch_kwargs = {"limit": 10, "min_id": baseline_id}
             if topic_id is not None:
@@ -2974,10 +2978,16 @@ async def reply_to_message(chat_id: Union[int, str], message_id: int, text: str,
     try:
         entity = await client.get_entity(chat_id)
         if topic_id is not None:
+            peer = await client.get_input_entity(entity)
             reply_to = InputReplyToMessage(
                 reply_to_msg_id=message_id, top_msg_id=topic_id
             )
-            await client.send_message(entity, text, reply_to=reply_to)
+            await client(functions.messages.SendMessageRequest(
+                peer=peer,
+                message=text,
+                reply_to=reply_to,
+                random_id=random.randrange(-2**63, 2**63),
+            ))
         else:
             await client.send_message(entity, text, reply_to=message_id)
         return f"Replied to message {message_id} in chat {chat_id}."
