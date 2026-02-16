@@ -62,11 +62,11 @@ This MCP server exposes a huge suite of Telegram tools. **Every major Telegram/T
 - **subscribe_public_channel(channel)**: Subscribe to a public channel or supergroup by username or ID
 
 ### Messaging
-- **get_messages(chat_id, page, page_size)**: Paginated messages
+- **get_messages(chat_id, page, page_size, topic_id)**: Paginated messages, optionally filtered by forum topic
 - **list_messages(chat_id, limit, search_query, from_date, to_date)**: Filtered messages
-- **list_topics(chat_id, limit, offset_topic, search_query)**: List forum topics in supergroups
-- **send_message(chat_id, message)**: Send a message
-- **reply_to_message(chat_id, message_id, text)**: Reply to a message
+- **send_message(chat_id, message, topic_id)**: Send a message, optionally to a specific forum topic
+- **reply_to_message(chat_id, message_id, text, topic_id)**: Reply to a message, with forum topic support
+- **wait_for_response(chat_id, topic_id, timeout, from_bot_only)**: Wait for new messages in a chat with polling (useful for bot interactions)
 - **edit_message(chat_id, message_id, new_text)**: Edit your message
 - **delete_message(chat_id, message_id)**: Delete a message
 - **forward_message(from_chat_id, message_id, to_chat_id)**: Forward a message
@@ -78,11 +78,16 @@ This MCP server exposes a huge suite of Telegram tools. **Every major Telegram/T
 - **get_pinned_messages(chat_id)**: List pinned messages
 - **get_last_interaction(contact_id)**: Most recent message with a contact
 - **create_poll(chat_id, question, options, multiple_choice, quiz_mode, public_votes, close_date)**: Create a poll
-- **list_inline_buttons(chat_id, message_id, limit)**: Inspect inline keyboards to discover button text/index
-- **press_inline_button(chat_id, message_id, button_text, button_index)**: Trigger inline keyboard callbacks by label or index
--  **send_reaction(chat_id, message_id, emoji, big=False)**: Add a reaction to a message
--  **remove_reaction(chat_id, message_id)**: Remove a reaction from a message
--  **get_message_reactions(chat_id, message_id, limit=50)**: Get all reactions on a message
+- **list_inline_buttons(chat_id, message_id, limit)**: Inspect inline keyboards to discover button text/index/URLs
+- **press_inline_button(chat_id, message_id, button_text, button_index, button_row, button_col, button_data)**: Trigger inline keyboard callbacks by label, index, row/col position, or callback data
+- **send_reaction(chat_id, message_id, emoji, big=False)**: Add a reaction to a message
+- **remove_reaction(chat_id, message_id)**: Remove a reaction from a message
+- **get_message_reactions(chat_id, message_id, limit=50)**: Get all reactions on a message
+
+### Forum Topics
+- **list_topics(chat_id, limit, offset_topic, search_query)**: List forum topics in a supergroup
+- **create_forum_topic(chat_id, title, icon_color, icon_emoji_id)**: Create a new forum topic
+- **delete_forum_topic(chat_id, topic_id)**: Delete a forum topic and all its messages (cannot delete General topic)
 
 ### Contact Management
 - **list_contacts()**: List all contacts
@@ -239,9 +244,10 @@ docker run -it --rm \
 
 ---
 
-## ⚙️ Configuration for Claude & Cursor
+## ⚙️ Configuration for Claude Desktop, Cursor & Claude Code
 
-### MCP Configuration
+### Claude Desktop / Cursor
+
 Edit your Claude desktop config (e.g. `~/Library/Application Support/Claude/claude_desktop_config.json`) or Cursor config (`~/.cursor/mcp.json`):
 
 ```json
@@ -259,6 +265,58 @@ Edit your Claude desktop config (e.g. `~/Library/Application Support/Claude/clau
   }
 }
 ```
+
+### Claude Code (CLI)
+
+You can add the MCP server to Claude Code using the `claude mcp add` command:
+
+```bash
+claude mcp add --transport stdio telegram-mcp \
+  --env TELEGRAM_API_ID=your_api_id \
+  --env TELEGRAM_API_HASH=your_api_hash \
+  --env TELEGRAM_SESSION_STRING=your_session_string \
+  -- uv --directory /full/path/to/telegram-mcp run main.py
+```
+
+Or create a `.mcp.json` file in your project root:
+
+```json
+{
+  "mcpServers": {
+    "telegram-mcp": {
+      "type": "stdio",
+      "command": "uv",
+      "args": [
+        "--directory",
+        "/full/path/to/telegram-mcp",
+        "run",
+        "main.py"
+      ],
+      "env": {
+        "TELEGRAM_API_ID": "your_api_id",
+        "TELEGRAM_API_HASH": "your_api_hash",
+        "TELEGRAM_SESSION_STRING": "your_session_string"
+      }
+    }
+  }
+}
+```
+
+**Scope options for `claude mcp add`:**
+
+| Flag | Scope | Description |
+|------|-------|-------------|
+| *(default)* | Local | Private to you, current project only |
+| `--scope project` | Project | Shared via `.mcp.json` (committed to git) |
+| `--scope user` | User | Available across all your projects |
+
+After adding, restart Claude Code. Verify with:
+
+```bash
+claude mcp list
+```
+
+Inside Claude Code, use `/mcp` to check connection status.
 
 ## 📝 Tool Examples with Code & Output
 
@@ -363,20 +421,31 @@ async def press_inline_button(
     message_id: Optional[int] = None,
     button_text: Optional[str] = None,
     button_index: Optional[int] = None,
+    button_row: Optional[int] = None,
+    button_col: Optional[int] = None,
+    button_data: Optional[str] = None,
 ) -> str:
     """
-    Press an inline keyboard button by label or zero-based index.
+    Press an inline keyboard button by label, zero-based index, row/col position, or callback data.
     If message_id is omitted, the server searches recent messages for the latest inline keyboard.
     """
 ```
 
 Example usage:
 ```
+# By button text
 press_inline_button(chat_id="@sample_tasks_bot", button_text="📋 View tasks")
+
+# By row/col position (0-indexed)
+press_inline_button(chat_id="@sample_tasks_bot", message_id=42, button_row=0, button_col=1)
+
+# By callback data
+press_inline_button(chat_id="@sample_tasks_bot", button_data="show_tasks")
 ```
 
-Use `list_inline_buttons` first if you need to inspect available buttons—pass a bogus `button_text`
-to quickly list options or call `list_inline_buttons` directly. Once you know the text or index,
+**Selection priority:** row/col > data > text > index.
+
+Use `list_inline_buttons` first to inspect available buttons. Once you know the text, index, or position,
 `press_inline_button` sends the callback, just like tapping the button in a native Telegram client.
 
 ### Subscribing to Public Channels
@@ -609,6 +678,11 @@ Chat ID: 123456789, Contact: John Smith, Username: @johnsmith, Unread: 3
 - "Join the Telegram group with invite link https://t.me/+AbCdEfGhIjK"
 - "Send a sticker to my Saved Messages"
 - "Get all my sticker sets"
+- "Create a forum topic called 'Announcements' in group -100123456789"
+- "Send a message to the 'General' topic in the forum group"
+- "List all forum topics in group -100123456789"
+- "Talk to @mybot and click the first button it shows"
+- "Wait for a response from the bot after sending /start"
 
 You can use these tools via natural language in Claude, Cursor, or any MCP-compatible client.
 
