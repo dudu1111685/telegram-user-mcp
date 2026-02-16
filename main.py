@@ -102,6 +102,22 @@ else:
     # Use file-based session
     client = TelegramClient(TELEGRAM_SESSION_NAME, TELEGRAM_API_ID, TELEGRAM_API_HASH)
 
+# Event to signal Telegram client is ready (set by background connect task)
+_client_ready = asyncio.Event()
+
+_original_client_start = client.start
+
+async def _background_connect():
+    """Connect Telegram client in background so MCP stdio starts immediately."""
+    try:
+        print("Connecting Telegram client...", file=sys.stderr)
+        await _original_client_start()
+        _client_ready.set()
+        print("Telegram client connected.", file=sys.stderr)
+    except Exception as e:
+        print(f"Failed to connect Telegram: {e}", file=sys.stderr)
+        _client_ready.set()  # Unblock tools so they can fail gracefully
+
 # Setup robust logging with both file and console output
 logger = logging.getLogger("telegram_mcp")
 logger.setLevel(logging.ERROR)  # Set to ERROR for production, INFO for debugging
@@ -135,7 +151,7 @@ try:
     logger.addHandler(file_handler)
     logger.info(f"Logging initialized to {log_file_path}")
 except Exception as log_error:
-    print(f"WARNING: Error setting up log file: {log_error}")
+    print(f"WARNING: Error setting up log file: {log_error}", file=sys.stderr)
     # Fallback to console-only logging
     logger.addHandler(console_handler)
     logger.error(f"Failed to set up log file handler: {log_error}")
@@ -216,6 +232,8 @@ def validate_id(*param_names_to_validate):
     def decorator(func):
         @wraps(func)
         async def wrapper(*args, **kwargs):
+            # Wait for Telegram client to be ready
+            await _client_ready.wait()
             for param_name in param_names_to_validate:
                 if param_name not in kwargs or kwargs[param_name] is None:
                     continue
@@ -375,6 +393,7 @@ async def get_chats(page: int = 1, page_size: int = 20) -> str:
         page_size: Number of chats per page.
     """
     try:
+        await _client_ready.wait()
         dialogs = await client.get_dialogs()
         start = (page - 1) * page_size
         end = start + page_size
@@ -784,6 +803,7 @@ async def list_contacts() -> str:
     List all contacts in your Telegram account.
     """
     try:
+        await _client_ready.wait()
         result = await client(functions.contacts.GetContactsRequest(hash=0))
         users = result.users
         if not users:
@@ -814,6 +834,7 @@ async def search_contacts(query: str) -> str:
         query: The search term to look for in contact names, usernames, or phone numbers.
     """
     try:
+        await _client_ready.wait()
         result = await client(functions.contacts.SearchRequest(q=query, limit=50))
         users = result.users
         if not users:
@@ -842,6 +863,7 @@ async def get_contact_ids() -> str:
     Get all contact IDs in your Telegram account.
     """
     try:
+        await _client_ready.wait()
         result = await client(functions.contacts.GetContactIDsRequest(hash=0))
         if not result:
             return "No contact IDs found."
@@ -997,6 +1019,7 @@ async def list_topics(
         search_query: Optional query to filter topics by title.
     """
     try:
+        await _client_ready.wait()
         entity = await client.get_entity(chat_id)
 
         if not isinstance(entity, Channel) or not getattr(entity, "megagroup", False):
@@ -1159,6 +1182,7 @@ async def list_chats(chat_type: str = None, limit: int = 20) -> str:
         limit: Maximum number of chats to retrieve.
     """
     try:
+        await _client_ready.wait()
         dialogs = await client.get_dialogs(limit=limit)
 
         results = []
@@ -4432,11 +4456,10 @@ async def reorder_folders(folder_ids: List[int]) -> str:
 
 async def _main() -> None:
     try:
-        # Start the Telethon client non-interactively
-        print("Starting Telegram client...")
-        await client.start()
+        # Connect Telegram in background so MCP stdio starts immediately
+        asyncio.create_task(_background_connect())
 
-        print("Telegram client started. Running MCP server...")
+        print("Starting MCP server...", file=sys.stderr)
         # Use the asynchronous entrypoint instead of mcp.run()
         await mcp.run_stdio_async()
     except Exception as e:
