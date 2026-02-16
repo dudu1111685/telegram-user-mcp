@@ -1002,8 +1002,8 @@ async def list_topics(
             return "The specified supergroup does not have forum topics enabled."
 
         result = await client(
-            functions.channels.GetForumTopicsRequest(
-                channel=entity,
+            functions.messages.GetForumTopicsRequest(
+                peer=entity,
                 offset_date=0,
                 offset_id=0,
                 offset_topic=offset_topic,
@@ -1082,7 +1082,7 @@ async def create_forum_topic(chat_id: Union[int, str], title: str, icon_color: O
             return "The specified supergroup does not have forum topics enabled."
 
         kwargs = {
-            "channel": entity,
+            "peer": entity,
             "title": title,
             "random_id": random.randint(0, 0x7FFFFFFF),
         }
@@ -1091,7 +1091,7 @@ async def create_forum_topic(chat_id: Union[int, str], title: str, icon_color: O
         if icon_emoji_id is not None:
             kwargs["icon_emoji_id"] = icon_emoji_id
 
-        result = await client(functions.channels.CreateForumTopicRequest(**kwargs))
+        result = await client(functions.messages.CreateForumTopicRequest(**kwargs))
 
         # Extract topic info from result
         updates = getattr(result, "updates", [])
@@ -1133,8 +1133,8 @@ async def delete_forum_topic(chat_id: Union[int, str], topic_id: int) -> str:
             return "The specified supergroup does not have forum topics enabled."
 
         await client(
-            functions.channels.DeleteTopicHistoryRequest(
-                channel=entity, top_msg_id=topic_id
+            functions.messages.DeleteTopicHistoryRequest(
+                peer=entity, top_msg_id=topic_id
             )
         )
 
