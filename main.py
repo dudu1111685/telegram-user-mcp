@@ -35,7 +35,9 @@ from telethon.tl.types import (
     DialogFilter,
     DialogFilterDefault,
     TextWithEntities,
+    InputReplyToMessage,
 )
+import random
 import re
 from functools import wraps
 import telethon.errors.rpcerrorlist
@@ -150,6 +152,7 @@ class ErrorCategory(str, Enum):
     AUTH = "AUTH"
     ADMIN = "ADMIN"
     FOLDER = "FOLDER"
+    FORUM = "FORUM"
 
 
 def log_and_format_error(
@@ -391,18 +394,22 @@ async def get_chats(page: int = 1, page_size: int = 20) -> str:
 
 @mcp.tool(annotations=ToolAnnotations(title="Get Messages", openWorldHint=True, readOnlyHint=True))
 @validate_id("chat_id")
-async def get_messages(chat_id: Union[int, str], page: int = 1, page_size: int = 20) -> str:
+async def get_messages(chat_id: Union[int, str], page: int = 1, page_size: int = 20, topic_id: Optional[int] = None) -> str:
     """
     Get paginated messages from a specific chat.
     Args:
         chat_id: The ID or username of the chat.
         page: Page number (1-indexed).
         page_size: Number of messages per page.
+        topic_id: Optional topic ID to get messages from a specific forum topic.
     """
     try:
         entity = await client.get_entity(chat_id)
         offset = (page - 1) * page_size
-        messages = await client.get_messages(entity, limit=page_size, add_offset=offset)
+        kwargs = {"limit": page_size, "add_offset": offset}
+        if topic_id is not None:
+            kwargs["reply_to"] = topic_id
+        messages = await client.get_messages(entity, **kwargs)
         if not messages:
             return "No messages found for this page."
         lines = []
@@ -420,7 +427,90 @@ async def get_messages(chat_id: Union[int, str], page: int = 1, page_size: int =
         return "\n".join(lines)
     except Exception as e:
         return log_and_format_error(
-            "get_messages", e, chat_id=chat_id, page=page, page_size=page_size
+            "get_messages", e, chat_id=chat_id, page=page, page_size=page_size, topic_id=topic_id
+        )
+
+
+@mcp.tool(annotations=ToolAnnotations(title="Wait For Response", openWorldHint=True, readOnlyHint=True))
+@validate_id("chat_id")
+async def wait_for_response(
+    chat_id: Union[int, str],
+    topic_id: Optional[int] = None,
+    timeout: int = 30,
+    from_bot_only: bool = False,
+) -> str:
+    """
+    Wait for new messages in a chat, optionally in a specific topic.
+
+    Args:
+        chat_id: The ID or username of the chat to monitor.
+        topic_id: Optional topic ID to monitor for messages in a specific forum topic.
+        timeout: Maximum seconds to wait for a response (default 30, max 120).
+        from_bot_only: If True, only return messages from bot accounts.
+    """
+    try:
+        timeout = min(max(timeout, 1), 120)
+        entity = await client.get_entity(chat_id)
+
+        # Get current last message as baseline
+        kwargs = {"limit": 1}
+        if topic_id is not None:
+            kwargs["reply_to"] = topic_id
+        baseline_messages = await client.get_messages(entity, **kwargs)
+        baseline_id = baseline_messages[0].id if baseline_messages else 0
+
+        # Poll for new messages
+        poll_interval = 1.0
+        deadline = time.monotonic() + timeout
+        new_messages = []
+
+        while time.monotonic() < deadline:
+            await asyncio.sleep(poll_interval)
+
+            fetch_kwargs = {"limit": 10, "min_id": baseline_id}
+            if topic_id is not None:
+                fetch_kwargs["reply_to"] = topic_id
+            msgs = await client.get_messages(entity, **fetch_kwargs)
+
+            if msgs:
+                # Advance baseline to avoid re-fetching seen messages
+                baseline_id = max(msg.id for msg in msgs)
+                for msg in msgs:
+                    if from_bot_only:
+                        sender = msg.sender
+                        if not sender or not getattr(sender, "bot", False):
+                            continue
+                    new_messages.append(msg)
+
+                if new_messages:
+                    break
+
+        if not new_messages:
+            return f"No new messages received within {timeout} seconds."
+
+        lines = []
+        for msg in new_messages:
+            sender_name = get_sender_name(msg)
+
+            # Check for inline buttons
+            buttons_info = ""
+            if getattr(msg, "buttons", None):
+                button_list = []
+                for row_idx, row in enumerate(msg.buttons):
+                    for col_idx, btn in enumerate(row):
+                        btn_text = getattr(btn, "text", "") or "<no text>"
+                        has_callback = bool(getattr(btn, "data", None))
+                        button_list.append(f"[{row_idx},{col_idx}] {btn_text} (callback={'yes' if has_callback else 'no'})")
+                buttons_info = f" | Buttons: {'; '.join(button_list)}"
+
+            lines.append(
+                f"ID: {msg.id} | {sender_name} | Date: {msg.date} | Message: {msg.message or '[Media/No text]'}{buttons_info}"
+            )
+
+        return "\n".join(lines)
+    except Exception as e:
+        return log_and_format_error(
+            "wait_for_response", e, chat_id=chat_id, topic_id=topic_id, timeout=timeout
         )
 
 
@@ -428,19 +518,23 @@ async def get_messages(chat_id: Union[int, str], page: int = 1, page_size: int =
     annotations=ToolAnnotations(title="Send Message", openWorldHint=True, destructiveHint=True)
 )
 @validate_id("chat_id")
-async def send_message(chat_id: Union[int, str], message: str) -> str:
+async def send_message(chat_id: Union[int, str], message: str, topic_id: Optional[int] = None) -> str:
     """
     Send a message to a specific chat.
     Args:
         chat_id: The ID or username of the chat.
         message: The message content to send.
+        topic_id: Optional topic ID to send the message in a specific forum topic.
     """
     try:
         entity = await client.get_entity(chat_id)
-        await client.send_message(entity, message)
+        if topic_id is not None:
+            await client.send_message(entity, message, reply_to=topic_id)
+        else:
+            await client.send_message(entity, message)
         return "Message sent successfully."
     except Exception as e:
-        return log_and_format_error("send_message", e, chat_id=chat_id)
+        return log_and_format_error("send_message", e, chat_id=chat_id, topic_id=topic_id)
 
 
 @mcp.tool(
@@ -547,6 +641,9 @@ async def press_inline_button(
     message_id: Optional[Union[int, str]] = None,
     button_text: Optional[str] = None,
     button_index: Optional[int] = None,
+    button_row: Optional[int] = None,
+    button_col: Optional[int] = None,
+    button_data: Optional[str] = None,
 ) -> str:
     """
     Press an inline button (callback) in a chat message.
@@ -556,10 +653,13 @@ async def press_inline_button(
         message_id: Specific message ID to inspect. If omitted, searches recent messages for one containing buttons.
         button_text: Exact text of the button to press (case-insensitive).
         button_index: Zero-based index among all buttons if you prefer positional access.
+        button_row: Row index (0-based) for row/col selection. Must be used together with button_col.
+        button_col: Column index (0-based) for row/col selection. Must be used together with button_row.
+        button_data: Callback data string to match against button data.
     """
     try:
-        if button_text is None and button_index is None:
-            return "Provide button_text or button_index to choose a button."
+        if button_text is None and button_index is None and (button_row is None or button_col is None) and button_data is None:
+            return "Provide button_text, button_index, button_row+button_col, or button_data to choose a button."
 
         # Normalize message_id if provided as a string
         if isinstance(message_id, str):
@@ -599,7 +699,24 @@ async def press_inline_button(
             return f"Message {target_message.id} does not contain inline buttons."
 
         target_button = None
-        if button_text:
+
+        # Selection by row/col
+        if button_row is not None and button_col is not None:
+            if button_row < 0 or button_row >= len(buttons_attr):
+                return f"button_row out of range. Valid rows: 0-{len(buttons_attr) - 1}."
+            row_buttons = buttons_attr[button_row]
+            if button_col < 0 or button_col >= len(row_buttons):
+                return f"button_col out of range. Valid columns for row {button_row}: 0-{len(row_buttons) - 1}."
+            target_button = row_buttons[button_col]
+
+        # Selection by callback data
+        if target_button is None and button_data is not None:
+            target_button = next(
+                (btn for btn in buttons if (getattr(btn, "data", None) or b"").decode("utf-8", errors="replace") == button_data),
+                None,
+            )
+
+        if target_button is None and button_text:
             normalized = button_text.strip().lower()
             target_button = next(
                 (
@@ -940,6 +1057,91 @@ async def list_topics(
             limit=limit,
             offset_topic=offset_topic,
             search_query=search_query,
+        )
+
+
+@mcp.tool(annotations=ToolAnnotations(title="Create Forum Topic", openWorldHint=True, destructiveHint=True))
+@validate_id("chat_id")
+async def create_forum_topic(chat_id: Union[int, str], title: str, icon_color: Optional[int] = None, icon_emoji_id: Optional[int] = None) -> str:
+    """
+    Create a new forum topic in a forum-enabled supergroup.
+
+    Args:
+        chat_id: The ID or username of the forum-enabled supergroup.
+        title: The title of the new topic.
+        icon_color: Optional color for the topic icon (integer).
+        icon_emoji_id: Optional custom emoji ID for the topic icon.
+    """
+    try:
+        entity = await client.get_entity(chat_id)
+
+        if not isinstance(entity, Channel) or not getattr(entity, "megagroup", False):
+            return "The specified chat is not a supergroup."
+
+        if not getattr(entity, "forum", False):
+            return "The specified supergroup does not have forum topics enabled."
+
+        kwargs = {
+            "channel": entity,
+            "title": title,
+            "random_id": random.randint(0, 0x7FFFFFFF),
+        }
+        if icon_color is not None:
+            kwargs["icon_color"] = icon_color
+        if icon_emoji_id is not None:
+            kwargs["icon_emoji_id"] = icon_emoji_id
+
+        result = await client(functions.channels.CreateForumTopicRequest(**kwargs))
+
+        # Extract topic info from result
+        updates = getattr(result, "updates", [])
+        topic_id = None
+        for update in updates:
+            if hasattr(update, "id"):
+                topic_id = update.id
+                break
+
+        if topic_id:
+            return f"Forum topic '{title}' created successfully. Topic ID: {topic_id}"
+        return f"Forum topic '{title}' created successfully."
+    except Exception as e:
+        return log_and_format_error(
+            "create_forum_topic", e, ErrorCategory.FORUM, chat_id=chat_id, title=title
+        )
+
+
+@mcp.tool(annotations=ToolAnnotations(title="Delete Forum Topic", openWorldHint=True, destructiveHint=True))
+@validate_id("chat_id")
+async def delete_forum_topic(chat_id: Union[int, str], topic_id: int) -> str:
+    """
+    Delete a forum topic and all its messages from a forum-enabled supergroup.
+
+    Args:
+        chat_id: The ID or username of the forum-enabled supergroup.
+        topic_id: The ID of the topic to delete. Cannot delete the General topic (ID 1).
+    """
+    try:
+        if topic_id == 1:
+            return "Cannot delete the General topic (ID 1)."
+
+        entity = await client.get_entity(chat_id)
+
+        if not isinstance(entity, Channel) or not getattr(entity, "megagroup", False):
+            return "The specified chat is not a supergroup."
+
+        if not getattr(entity, "forum", False):
+            return "The specified supergroup does not have forum topics enabled."
+
+        await client(
+            functions.channels.DeleteTopicHistoryRequest(
+                channel=entity, top_msg_id=topic_id
+            )
+        )
+
+        return f"Forum topic {topic_id} deleted successfully."
+    except Exception as e:
+        return log_and_format_error(
+            "delete_forum_topic", e, ErrorCategory.FORUM, chat_id=chat_id, topic_id=topic_id
         )
 
 
@@ -2759,17 +2961,29 @@ async def mark_as_read(chat_id: Union[int, str]) -> str:
     annotations=ToolAnnotations(title="Reply To Message", openWorldHint=True, destructiveHint=True)
 )
 @validate_id("chat_id")
-async def reply_to_message(chat_id: Union[int, str], message_id: int, text: str) -> str:
+async def reply_to_message(chat_id: Union[int, str], message_id: int, text: str, topic_id: Optional[int] = None) -> str:
     """
     Reply to a specific message in a chat.
+
+    Args:
+        chat_id: The ID or username of the chat.
+        message_id: The ID of the message to reply to.
+        text: The reply text.
+        topic_id: Optional topic ID for forum topics. The reply stays in the topic thread automatically.
     """
     try:
         entity = await client.get_entity(chat_id)
-        await client.send_message(entity, text, reply_to=message_id)
+        if topic_id is not None:
+            reply_to = InputReplyToMessage(
+                reply_to_msg_id=message_id, top_msg_id=topic_id
+            )
+            await client.send_message(entity, text, reply_to=reply_to)
+        else:
+            await client.send_message(entity, text, reply_to=message_id)
         return f"Replied to message {message_id} in chat {chat_id}."
     except Exception as e:
         return log_and_format_error(
-            "reply_to_message", e, chat_id=chat_id, message_id=message_id, text=text
+            "reply_to_message", e, chat_id=chat_id, message_id=message_id, topic_id=topic_id
         )
 
 
@@ -3574,8 +3788,6 @@ async def save_draft(
         # Build reply_to parameter if provided
         reply_to = None
         if reply_to_msg_id:
-            from telethon.tl.types import InputReplyToMessage
-
             reply_to = InputReplyToMessage(reply_to_msg_id=reply_to_msg_id)
 
         await client(
